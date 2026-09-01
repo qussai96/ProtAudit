@@ -1,0 +1,6 @@
+numpy>=1.24
+matplotlib>=3.7
+transformers>=4.38
+sentencepiece>=0.2
+fair-esm>=2.0
+git+https://github.com/microsoft/protein-sequence-models.git

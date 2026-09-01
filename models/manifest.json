@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "models": {
+    "prott5": {
+      "checkpoint": "models/prott5.pt",
+      "dimension": 1024,
+      "validation_threshold": 0.45833838,
+      "sha256": "3c5b8484aa2faf5a7b320e4bfc4a7d75d967293f022ccf40c710562939ef030b"
+    },
+    "esm2_320": {
+      "checkpoint": "models/esm2_320.pt",
+      "dimension": 320,
+      "validation_threshold": 0.412029296,
+      "sha256": "a410ac97a612ad70be6436b3ba9f31b8a827caa24cf52326ac4e0027be66923f"
+    },
+    "esm2_1280": {
+      "checkpoint": "models/esm2_1280.pt",
+      "dimension": 1280,
+      "validation_threshold": 0.39566949,
+      "sha256": "7d2bdd67e0a3f7cb435107ccf3041e42ac20fff17f009ca663357c8f21c2423b"
+    },
+    "carp": {
+      "checkpoint": "models/carp.pt",
+      "dimension": 1280,
+      "validation_threshold": 0.402606249,
+      "sha256": "9af89cd358b3bb86323b7c5a44348f46021cffc4d49e23c6863344dd13002e36"
+    }
+  }
+}
