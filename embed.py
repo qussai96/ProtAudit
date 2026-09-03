@@ -72,6 +72,10 @@ def read_fasta(path):
 
 def validate_record(identifier, sequence, seen):
     sequence = sequence.upper()
+    # Many protein FASTA exporters append one stop symbol. Treat it as
+    # formatting only when terminal; internal dots/asterisks remain invalid.
+    if sequence.endswith((".", "*")):
+        sequence = sequence[:-1]
     if identifier in seen:
         raise ValueError(f"Duplicate FASTA ID: {identifier}")
     seen.add(identifier)
