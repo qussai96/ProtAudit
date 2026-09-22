@@ -97,10 +97,12 @@ def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
     positive = int((scores >= threshold).sum())
     binary_counts = np.array([positive, len(scores) - positive])
     binary_labels = ("Positive", "Negative")
-    binary_colors = ("#3F78A0", "#EE999B")
+    binary_colors = ("#72B6C9", "#C2A4C3")
     has_diagnostics = diagnostic_calls is not None
-    fig, axes = plt.subplots(2 if has_diagnostics else 1, 1,
-                             figsize=(12, 5.5 if has_diagnostics else 2.7))
+    rows = 3 if has_diagnostics else 2
+    height_ratios = [1.0, 1.2, 3.7] if has_diagnostics else [1.0, 3.7]
+    fig, axes = plt.subplots(rows, 1, figsize=(7.2, 9.0 if has_diagnostics else 7.0),
+                             gridspec_kw={"height_ratios": height_ratios})
     axes = np.atleast_1d(axes)
 
     def stacked_bar(ax, counts, labels, colors, title):
@@ -111,24 +113,53 @@ def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
             ax.barh(0, fraction, left=left, height=0.62, color=color, edgecolor="none")
             if count:
                 ax.text(left + fraction / 2, 0, f"{count:,} ({fraction:.0%})",
-                        ha="center", va="center", fontsize=11, fontweight="bold")
+                        ha="center", va="center", fontsize=11, fontweight="bold", color="white")
             left += fraction
-        ax.set(xlim=(0, 1), ylim=(-0.55, 0.55), title=title)
+        ax.set(xlim=(0, 1), ylim=(-0.55, 0.55))
         ax.axis("off")
-        ax.legend(handles=[Patch(facecolor=c, label=l) for c, l in zip(colors, labels)],
-                  loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=min(5, len(labels)),
-                  frameon=False, fontsize=9)
+        ax.set_title(title, fontsize=17, fontweight="bold", pad=42)
+        handles = [Patch(facecolor=c, label=l) for c, l in zip(colors, labels)]
+        if len(handles) == 5:
+            # Matplotlib fills multirow legends by column; reorder so the visible
+            # rows read 1-2-3 and then 4-5, matching the notebook reference.
+            handles = [handles[i] for i in (0, 3, 1, 4, 2)]
+        ax.legend(handles=handles,
+                  loc="upper center", bbox_to_anchor=(0.5, 1.48), ncol=min(3, len(labels)),
+                  frameon=False, fontsize=11, handlelength=1.2, columnspacing=1.4)
 
     stacked_bar(axes[0], binary_counts, binary_labels, binary_colors,
-                "Stage 1: binary ProtAudit call")
+                "Overall ProtAudit classification")
     if has_diagnostics:
         diagnostic_counts = np.array([(diagnostic_calls == name).sum() for name in diagnostic_classes])
-        labels = tuple(name.replace("_", " ") for name in diagnostic_classes)
-        colors = ("#4C78A8", "#F28E2B", "#E15759", "#59A14F", "#B07AA1")
+        label_map = {
+            "chimeric_fusion_like": "chimeric fusion",
+            "splice_internal_disruption_like": "splice internal disruption",
+            "incomplete_terminally_abnormal": "abnormal terminal",
+            "cryptic_orf_like": "cryptic orf",
+            "repeat_like_orf": "repeat orf",
+        }
+        labels = tuple(label_map[name] for name in diagnostic_classes)
+        colors = ("#386B9E", "#EBA943", "#D9575F", "#76A36E", "#8D78AE")
         stacked_bar(axes[1], diagnostic_counts, labels, colors,
-                    "Stage 2: diagnostic class among binary negatives")
-    fig.suptitle("ProtAudit two-stage results", fontsize=18, y=1.01)
-    fig.tight_layout()
+                    "Composition of the negative group")
+
+    histogram_axis = axes[-1]
+    bin_count = min(100, len(scores))
+    histogram_axis.hist(scores, bins=np.linspace(0, 1, bin_count + 1),
+                        color="#5B84AD", edgecolor="white", linewidth=0.6)
+    histogram_axis.axvline(threshold, color="#F23845", linestyle="--", linewidth=1.8,
+                           label=f"Frozen threshold = {threshold:.3f}")
+    median = float(np.median(scores))
+    histogram_axis.axvline(median, color="#111111", linestyle=":", linewidth=1.8,
+                           label=f"Median = {median:.3f}")
+    histogram_axis.set(xlim=(0, 1.03), xlabel="ProtAudit protein-likeness score",
+                       ylabel="Number of proteins")
+    histogram_axis.set_title("Distribution of ProtAudit protein-likeness scores",
+                             fontsize=17, fontweight="bold", pad=20)
+    histogram_axis.spines[["top", "right"]].set_visible(False)
+    histogram_axis.legend(frameon=False, fontsize=10, loc="upper left")
+    histogram_axis.tick_params(labelsize=10)
+    fig.tight_layout(h_pad=2.4)
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
