@@ -112,10 +112,22 @@ def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
             fraction = count / total if total else 0
             ax.barh(0, fraction, left=left, height=0.62, color=color, edgecolor="none")
             if count:
-                ax.text(left + fraction / 2, 0, f"{count:,} ({fraction:.0%})",
-                        ha="center", va="center", fontsize=11, fontweight="bold", color="white")
+                text = f"{count:,} ({fraction:.0%})"
+                center = left + fraction / 2
+                if fraction >= 0.12:
+                    ax.text(center, 0, text, ha="center", va="center", fontsize=11,
+                            fontweight="bold", color="white")
+                else:
+                    # A full count/percentage label cannot fit inside a narrow
+                    # segment. Put it below the bar and point to the segment.
+                    alignment = "right" if center > 0.88 else "left" if center < 0.12 else "center"
+                    anchor = min(0.985, max(0.015, center))
+                    ax.annotate(text, xy=(center, -0.31), xytext=(anchor, -0.64),
+                                ha=alignment, va="top", fontsize=10, fontweight="bold",
+                                color="#222222", clip_on=False,
+                                arrowprops={"arrowstyle": "-", "color": "#555555", "lw": 0.8})
             left += fraction
-        ax.set(xlim=(0, 1), ylim=(-0.55, 0.55))
+        ax.set(xlim=(0, 1), ylim=(-0.82, 0.55))
         ax.axis("off")
         ax.set_title(title, fontsize=17, fontweight="bold", pad=42)
         handles = [Patch(facecolor=c, label=l) for c, l in zip(colors, labels)]
