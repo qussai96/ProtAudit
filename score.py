@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Score ProtAudit embeddings and write a TSV plus score-band plot."""
+"""Run binary ProtAudit scoring and conditional negative diagnostics."""
 
 import argparse
 import csv
@@ -68,33 +68,67 @@ def mlp_class(torch, dimension):
     return MLP
 
 
-def make_plot(scores, output):
+def diagnostic_mlp_class(torch, dimension, class_count):
+    class DiagnosticMLP(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            widths = [dimension, dimension // 2, dimension // 4, dimension // 6]
+            layers = []
+            for incoming, outgoing in zip(widths[:-1], widths[1:]):
+                layers.extend(
+                    (torch.nn.Linear(incoming, outgoing), torch.nn.LayerNorm(outgoing), torch.nn.ReLU())
+                )
+            self.features = torch.nn.Sequential(*layers)
+            self.classifier = torch.nn.Linear(widths[-1], class_count)
+
+        def forward(self, values):
+            return self.classifier(self.features(values))
+
+    return DiagnosticMLP
+
+
+def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib.patches import Patch
 
-    counts = np.array([(scores >= 0.9).sum(), ((scores >= 0.5) & (scores < 0.9)).sum(), (scores < 0.5).sum()])
-    fractions = counts / len(scores)
-    labels = (r"$\geq$0.9", "0.5–0.9", "<0.5")
-    colors = ("#3F78A0", "#B8D7AA", "#EE999B")
+    positive = int((scores >= threshold).sum())
+    binary_counts = np.array([positive, len(scores) - positive])
+    binary_labels = ("Positive", "Negative")
+    binary_colors = ("#3F78A0", "#EE999B")
+    has_diagnostics = diagnostic_calls is not None
+    fig, axes = plt.subplots(2 if has_diagnostics else 1, 1,
+                             figsize=(12, 5.5 if has_diagnostics else 2.7))
+    axes = np.atleast_1d(axes)
 
-    fig, ax = plt.subplots(figsize=(12, 2.7))
-    left = 0.0
-    for count, fraction, color in zip(counts, fractions, colors):
-        ax.barh(0, fraction, left=left, height=0.62, color=color, edgecolor="none")
-        if count:
-            text = f"{count:,} ({fraction:.0%})"
-            ax.text(left + fraction / 2, 0, text, ha="center", va="center", fontsize=13, fontweight="bold")
-        left += fraction
-    ax.set_xlim(0, 1)
-    ax.set_ylim(-0.55, 0.55)
-    ax.axis("off")
-    fig.suptitle("ProtAudit Scores", x=0.12, y=0.91, ha="left", fontsize=23)
-    handles = [Patch(facecolor=color, label=label) for color, label in zip(colors, labels)]
-    fig.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.67, 0.92), ncol=3,
-               frameon=False, fontsize=15, handlelength=0.8, handletextpad=0.35, columnspacing=1.1)
+    def stacked_bar(ax, counts, labels, colors, title):
+        total = counts.sum()
+        left = 0.0
+        for count, label, color in zip(counts, labels, colors):
+            fraction = count / total if total else 0
+            ax.barh(0, fraction, left=left, height=0.62, color=color, edgecolor="none")
+            if count:
+                ax.text(left + fraction / 2, 0, f"{count:,} ({fraction:.0%})",
+                        ha="center", va="center", fontsize=11, fontweight="bold")
+            left += fraction
+        ax.set(xlim=(0, 1), ylim=(-0.55, 0.55), title=title)
+        ax.axis("off")
+        ax.legend(handles=[Patch(facecolor=c, label=l) for c, l in zip(colors, labels)],
+                  loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=min(5, len(labels)),
+                  frameon=False, fontsize=9)
+
+    stacked_bar(axes[0], binary_counts, binary_labels, binary_colors,
+                "Stage 1: binary ProtAudit call")
+    if has_diagnostics:
+        diagnostic_counts = np.array([(diagnostic_calls == name).sum() for name in diagnostic_classes])
+        labels = tuple(name.replace("_", " ") for name in diagnostic_classes)
+        colors = ("#4C78A8", "#F28E2B", "#E15759", "#59A14F", "#B07AA1")
+        stacked_bar(axes[1], diagnostic_counts, labels, colors,
+                    "Stage 2: diagnostic class among binary negatives")
+    fig.suptitle("ProtAudit two-stage results", fontsize=18, y=1.01)
+    fig.tight_layout()
     output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close(fig)
@@ -152,16 +186,73 @@ def main():
     scores = np.concatenate(predictions)
     threshold = float(info["validation_threshold"])
 
+    diagnostic_classes = None
+    diagnostic_probabilities = None
+    diagnostic_calls = None
+    diagnostic_confidences = None
+    negative = scores < threshold
+    if model_name == "prott5":
+        diagnostic_info = manifest["diagnostic_model"]
+        if diagnostic_info["embedding_model"] != model_name or diagnostic_info["dimension"] != info["dimension"]:
+            raise ValueError("Diagnostic-model metadata is incompatible with ProtT5")
+        diagnostic_path = ROOT / diagnostic_info["checkpoint"]
+        if sha256(diagnostic_path) != diagnostic_info["sha256"]:
+            raise ValueError(f"Frozen diagnostic checkpoint checksum mismatch: {diagnostic_path}")
+        diagnostic_state = torch.load(diagnostic_path, map_location="cpu", weights_only=False)
+        diagnostic_classes = list(diagnostic_info["classes"])
+        if (diagnostic_state.get("dimension") != info["dimension"]
+                or diagnostic_state.get("layers") != 3
+                or list(diagnostic_state.get("classes", [])) != diagnostic_classes):
+            raise ValueError("Frozen diagnostic checkpoint metadata is incompatible")
+        diagnostic_model = diagnostic_mlp_class(torch, info["dimension"], len(diagnostic_classes))().eval()
+        diagnostic_model.load_state_dict(diagnostic_state["model_state_dict"])
+        chunks = []
+        negative_rows = np.flatnonzero(negative)
+        with torch.inference_mode():
+            for start in range(0, len(negative_rows), args.batch_size):
+                rows = negative_rows[start : start + args.batch_size]
+                values = torch.from_numpy(np.asarray(
+                    embeddings[rows], dtype=np.float32
+                ))
+                chunks.append(torch.softmax(diagnostic_model(values), dim=1).numpy())
+        diagnostic_probabilities = (np.concatenate(chunks) if chunks else
+                                    np.empty((0, len(diagnostic_classes)), dtype=np.float32))
+        codes = diagnostic_probabilities.argmax(axis=1) if len(diagnostic_probabilities) else np.array([], dtype=int)
+        diagnostic_calls = np.asarray(diagnostic_classes)[codes]
+        diagnostic_confidences = (diagnostic_probabilities[np.arange(len(codes)), codes]
+                                  if len(codes) else np.array([], dtype=np.float32))
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
-        writer.writerow(("protein_id", "protein_likeness_score", "passes_frozen_threshold", "score_band"))
+        header = ["protein_id", "binary_call", "protein_likeness_score",
+                  "passes_frozen_threshold", "score_band", "diagnostic_class",
+                  "diagnostic_class_probability"]
+        if diagnostic_classes:
+            header.extend(f"probability_{name}" for name in diagnostic_classes)
+        writer.writerow(header)
+        negative_row = 0
         for identifier, score in zip(ids, scores):
             band = ">=0.9" if score >= 0.9 else "0.5-0.9" if score >= 0.5 else "<0.5"
-            writer.writerow((identifier, f"{score:.8f}", str(bool(score >= threshold)), band))
+            is_positive = bool(score >= threshold)
+            row = [identifier, "positive" if is_positive else "negative", f"{score:.8f}",
+                   str(is_positive), band, "", ""]
+            if diagnostic_classes:
+                row.extend([""] * len(diagnostic_classes))
+                if not is_positive:
+                    row[5] = diagnostic_calls[negative_row]
+                    row[6] = f"{diagnostic_confidences[negative_row]:.8f}"
+                    row[7:] = [f"{value:.8f}" for value in diagnostic_probabilities[negative_row]]
+                    negative_row += 1
+            writer.writerow(row)
     plot_path = args.plot or args.output.with_name(f"{args.output.stem}_plot.png")
-    make_plot(scores, plot_path)
+    make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, plot_path)
     print(f"Scored {len(scores):,} proteins with {model_name}")
+    print(f"Binary calls: {int((~negative).sum()):,} positive; {int(negative.sum()):,} negative")
+    if diagnostic_classes:
+        print(f"Assigned conditional diagnostic probabilities to {int(negative.sum()):,} negatives")
+    else:
+        print("Conditional diagnostics are available only for ProtT5 embeddings")
     print(f"TSV:  {args.output}")
     print(f"Plot: {plot_path}")
 

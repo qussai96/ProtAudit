@@ -2,13 +2,21 @@
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/qussai96/ProtAudit/blob/main/ProtAudit_Colab.ipynb)
 
-ProtAudit assigns each protein a score from 0 to 1: higher values indicate a
-more protein-like sequence. The repository includes frozen MLP classifiers for
-ProtT5 (default), ESM-2 8M, ESM-2 650M, and CARP 640M.
+ProtAudit uses a two-stage workflow. First, the frozen binary model calls each
+sequence **positive** (protein-like) or **negative**. For ProtT5 binary-negative
+sequences, a separate frozen diagnostic model then reports probabilities for
+five simulated error phenotypes: fusion-like, internal-disruption-like,
+terminal-abnormality, cryptic-ORF-like, and repeat-like ORF. These diagnostic
+classes describe sequence resemblance and are not confirmed causal annotation
+errors.
+
+The repository includes frozen binary MLP classifiers for ProtT5 (default),
+ESM-2 8M, ESM-2 650M, and CARP 640M. Conditional diagnostic probabilities are
+currently available for ProtT5 only.
 
 For a small FASTA containing up to 100 proteins, open the Colab notebook using
 the badge above, select a GPU runtime, upload the FASTA, and run all cells. The
-notebook downloads a TSV score table and the ProtAudit score-band plot. Use the
+notebook downloads a TSV result table and the two-stage summary plot. Use the
 local installation below for larger files.
 
 ## Installation
@@ -46,12 +54,16 @@ residue-weighted mean.
 `embed.py` writes `embeddings.npy`, `ids.tsv`, and provenance/checksums in
 `summary.json`. `score.py` writes:
 
-- `protaudit_scores.tsv`: protein ID, score, frozen-threshold call, and score band.
-- `protaudit_scores_plot.png`: counts and percentages in the `>=0.9`, `0.5–0.9`,
-  and `<0.5` score bands.
+- `protaudit_scores.tsv`: protein ID, binary call, protein-likeness score,
+  frozen-threshold call, score band, and (for ProtT5 negatives) the predicted
+  diagnostic class, its top probability, and all five class probabilities.
+- `protaudit_scores_plot.png`: positive-versus-negative counts followed by the
+  diagnostic-class composition of binary-negative sequences.
 
 The frozen decision threshold is model-specific and was selected on the
-validation species. The three plot bands are descriptive confidence bands.
+validation species. Diagnostic probabilities are conditional on a sequence
+receiving a binary-negative call; they should not be interpreted as biological
+proof of a particular annotation error.
 
 ## Citation
 

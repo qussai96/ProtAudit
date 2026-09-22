@@ -1,5 +1,18 @@
 {
   "schema_version": 1,
+  "diagnostic_model": {
+    "checkpoint": "models/prott5_negative_diagnostic.pt",
+    "embedding_model": "prott5",
+    "dimension": 1024,
+    "classes": [
+      "chimeric_fusion_like",
+      "splice_internal_disruption_like",
+      "incomplete_terminally_abnormal",
+      "cryptic_orf_like",
+      "repeat_like_orf"
+    ],
+    "sha256": "e3883ceb044747daac622743d91e6fbd00aedb49ea1038efa55e2ae3458800f9"
+  },
   "models": {
     "prott5": {
       "checkpoint": "models/prott5.pt",
