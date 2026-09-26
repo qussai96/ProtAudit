@@ -5,38 +5,37 @@
     "embedding_model": "prott5",
     "dimension": 1024,
     "classes": [
-      "chimeric_fusion_like",
-      "splice_internal_disruption_like",
-      "incomplete_terminally_abnormal",
-      "cryptic_orf_like",
-      "repeat_like_orf"
+      "chimeric",
+      "splice_artifact",
+      "terminal_abnormal",
+      "cryptic_orf"
     ],
-    "sha256": "e3883ceb044747daac622743d91e6fbd00aedb49ea1038efa55e2ae3458800f9"
+    "sha256": "fe37cba2469999c1c6171a78b5be7de08cb7969e2698ff3221b4f7938040c743"
   },
   "models": {
     "prott5": {
       "checkpoint": "models/prott5.pt",
       "dimension": 1024,
-      "validation_threshold": 0.45833838,
-      "sha256": "3c5b8484aa2faf5a7b320e4bfc4a7d75d967293f022ccf40c710562939ef030b"
+      "validation_threshold": 0.508676887,
+      "sha256": "3cd893379d65c5bb9d413f812192b899adb2618cc61ced7d2878fee95d7f8951"
     },
     "esm2_320": {
       "checkpoint": "models/esm2_320.pt",
       "dimension": 320,
-      "validation_threshold": 0.412029296,
-      "sha256": "a410ac97a612ad70be6436b3ba9f31b8a827caa24cf52326ac4e0027be66923f"
+      "validation_threshold": 0.379136086,
+      "sha256": "fbadf42c9d3e75302b881eb8d3c9a18f95b0a498afe98920a40258bb5e580d2d"
     },
     "esm2_1280": {
       "checkpoint": "models/esm2_1280.pt",
       "dimension": 1280,
-      "validation_threshold": 0.39566949,
-      "sha256": "7d2bdd67e0a3f7cb435107ccf3041e42ac20fff17f009ca663357c8f21c2423b"
+      "validation_threshold": 0.388303876,
+      "sha256": "d035c31fdc5559ae3916cbea8ab3fc620a5915cdee799398c8c928095319a91c"
     },
     "carp": {
       "checkpoint": "models/carp.pt",
       "dimension": 1280,
-      "validation_threshold": 0.402606249,
-      "sha256": "9af89cd358b3bb86323b7c5a44348f46021cffc4d49e23c6863344dd13002e36"
+      "validation_threshold": 0.408014596,
+      "sha256": "0cf612f3c1cceeb56b9e392e2a8a0994970a05d5f2031205339ad5bc96c4a511"
     }
   }
 }

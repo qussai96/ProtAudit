@@ -5,8 +5,8 @@
 ProtAudit uses a two-stage workflow. First, the frozen binary model calls each
 sequence **positive** (protein-like) or **negative**. For ProtT5 binary-negative
 sequences, a separate frozen diagnostic model then reports probabilities for
-five simulated error phenotypes: fusion-like, internal-disruption-like,
-terminal-abnormality, cryptic-ORF-like, and repeat-like ORF. These diagnostic
+four simulated error classes: chimeric fusion, splice artifact, terminal
+abnormality, and Spurious ORFs. These diagnostic
 classes describe sequence resemblance and are not confirmed causal annotation
 errors.
 
@@ -56,7 +56,7 @@ residue-weighted mean.
 
 - `protaudit_scores.tsv`: protein ID, binary call, protein-likeness score,
   frozen-threshold call, score band, and (for ProtT5 negatives) the predicted
-  diagnostic class, its top probability, and all five class probabilities.
+  diagnostic class, its top probability, and all four class probabilities.
 - `protaudit_scores_plot.png`: positive-versus-negative counts followed by the
   diagnostic-class composition of binary-negative sequences.
 

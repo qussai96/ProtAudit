@@ -131,10 +131,6 @@ def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
         ax.axis("off")
         ax.set_title(title, fontsize=17, fontweight="bold", pad=42)
         handles = [Patch(facecolor=c, label=l) for c, l in zip(colors, labels)]
-        if len(handles) == 5:
-            # Matplotlib fills multirow legends by column; reorder so the visible
-            # rows read 1-2-3 and then 4-5, matching the notebook reference.
-            handles = [handles[i] for i in (0, 3, 1, 4, 2)]
         ax.legend(handles=handles,
                   loc="upper center", bbox_to_anchor=(0.5, 1.48), ncol=min(3, len(labels)),
                   frameon=False, fontsize=11, handlelength=1.2, columnspacing=1.4)
@@ -144,14 +140,13 @@ def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
     if has_diagnostics:
         diagnostic_counts = np.array([(diagnostic_calls == name).sum() for name in diagnostic_classes])
         label_map = {
-            "chimeric_fusion_like": "chimeric fusion",
-            "splice_internal_disruption_like": "splice internal disruption",
-            "incomplete_terminally_abnormal": "abnormal terminal",
-            "cryptic_orf_like": "cryptic orf",
-            "repeat_like_orf": "repeat orf",
+            "chimeric": "chimeric fusion",
+            "splice_artifact": "splice artifact",
+            "terminal_abnormal": "terminal abnormal",
+            "cryptic_orf": "Spurious ORFs",
         }
         labels = tuple(label_map[name] for name in diagnostic_classes)
-        colors = ("#386B9E", "#EBA943", "#D9575F", "#76A36E", "#8D78AE")
+        colors = ("#4C78A8", "#D95862", "#F2AE3D", "#78A66A")
         stacked_bar(axes[1], diagnostic_counts, labels, colors,
                     "Composition of the negative group")
 
@@ -224,7 +219,9 @@ def main():
     predictions = []
     with torch.inference_mode():
         for start in range(0, len(embeddings), args.batch_size):
-            values = torch.from_numpy(np.asarray(embeddings[start : start + args.batch_size], dtype=np.float32))
+            values = torch.from_numpy(np.array(
+                embeddings[start : start + args.batch_size], dtype=np.float32, copy=True
+            ))
             predictions.append(torch.sigmoid(model(values)).numpy())
     scores = np.concatenate(predictions)
     threshold = float(info["validation_threshold"])
@@ -243,8 +240,10 @@ def main():
             raise ValueError(f"Frozen diagnostic checkpoint checksum mismatch: {diagnostic_path}")
         diagnostic_state = torch.load(diagnostic_path, map_location="cpu", weights_only=False)
         diagnostic_classes = list(diagnostic_info["classes"])
+        expected_hidden = [info["dimension"] // 2, info["dimension"] // 4,
+                           info["dimension"] // 6]
         if (diagnostic_state.get("dimension") != info["dimension"]
-                or diagnostic_state.get("layers") != 3
+                or list(diagnostic_state.get("hidden", [])) != expected_hidden
                 or list(diagnostic_state.get("classes", [])) != diagnostic_classes):
             raise ValueError("Frozen diagnostic checkpoint metadata is incompatible")
         diagnostic_model = diagnostic_mlp_class(torch, info["dimension"], len(diagnostic_classes))().eval()
@@ -254,8 +253,8 @@ def main():
         with torch.inference_mode():
             for start in range(0, len(negative_rows), args.batch_size):
                 rows = negative_rows[start : start + args.batch_size]
-                values = torch.from_numpy(np.asarray(
-                    embeddings[rows], dtype=np.float32
+                values = torch.from_numpy(np.array(
+                    embeddings[rows], dtype=np.float32, copy=True
                 ))
                 chunks.append(torch.softmax(diagnostic_model(values), dim=1).numpy())
         diagnostic_probabilities = (np.concatenate(chunks) if chunks else
