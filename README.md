@@ -43,6 +43,15 @@ pip install -r requirements.txt
 
 ## Running
 
+### Run in Colab — up to 100 sequences
+
+For small analyses, open the
+[ProtAudit Colab notebook](https://colab.research.google.com/github/qussai96/ProtAudit/blob/main/ProtAudit_Colab.ipynb),
+select a GPU runtime, paste up to 100 protein sequences in FASTA format, and
+run the cells in order. No local installation is required.
+
+### Run locally
+
 Embed a protein FASTA (ProtT5 is used unless `--model` is supplied), then score
 the embeddings:
 
