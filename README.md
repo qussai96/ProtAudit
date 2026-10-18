@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/ProtAudit_logo.jpg" alt="ProtAudit logo" width="280">
+</p>
+
 # ProtAudit
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/qussai96/ProtAudit/blob/main/ProtAudit_Colab.ipynb)
