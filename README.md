@@ -1,10 +1,10 @@
-<p align="center">
-  <img src="assets/ProtAudit_logo.jpg" alt="ProtAudit logo" width="280">
-</p>
+<div align="center">
+  <a href="https://colab.research.google.com/github/qussai96/ProtAudit/blob/main/ProtAudit_Colab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open in Colab" align="middle"></a>&nbsp;&nbsp;
+  <img src="assets/ProtAudit_logo.jpg" alt="ProtAudit logo" width="220" align="middle">&nbsp;&nbsp;
+  <img src="assets/chimeric-example.jpg" alt="ProtAudit localization of a literature-reported chimeric protein" width="520" align="middle">
+</div>
 
 # ProtAudit
-
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/qussai96/ProtAudit/blob/main/ProtAudit_Colab.ipynb)
 
 ProtAudit uses a sequential audit workflow. First, the frozen binary model calls each
 sequence **positive** (protein-like) or **negative**. For ProtT5 binary-negative
