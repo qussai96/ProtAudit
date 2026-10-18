@@ -18,7 +18,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 CONFIGS = {
-    "prott5": {"dimension": 1024, "window": 1000},
+    "prott5": {"dimension": 1024, "window": 1000, "overlap": 128},
     "esm2_1280": {"dimension": 1280, "window": 1022, "layer": 33},
     "esm2_320": {"dimension": 320, "window": 1022, "layer": 6},
     "carp": {"dimension": 1280, "window": 1024, "layer": 56},
@@ -36,6 +36,10 @@ def parse_args():
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     parser.add_argument("--max-batch-tokens", type=int, default=8000)
     parser.add_argument("--max-batch-size", type=int, default=32)
+    parser.add_argument(
+        "--skip-residue-embeddings", action="store_true",
+        help="Do not retain ProtT5 residue embeddings (disables error localization)",
+    )
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args()
 
@@ -87,10 +91,18 @@ def validate_record(identifier, sequence, seen):
     return identifier, sequence
 
 
-def make_windows(records, size):
+def make_windows(records, size, overlap=0):
     windows = []
     for row, (_, sequence) in enumerate(records):
-        for start in range(0, len(sequence), size):
+        if not overlap or len(sequence) <= size:
+            starts = range(0, len(sequence), size)
+        else:
+            stride = size - overlap
+            starts = list(range(0, len(sequence) - size + 1, stride))
+            final = len(sequence) - size
+            if starts[-1] != final:
+                starts.append(final)
+        for start in starts:
             piece = sequence[start : start + size]
             windows.append((len(piece), row, start, piece))
     windows.sort(key=lambda item: (item[0], item[1], item[2]))
@@ -175,7 +187,7 @@ def load_backend(name, torch, device):
                     raise RuntimeError(
                         f"ProtT5 token/residue mismatch: {active - 1} tokens for {residues} residues"
                     )
-                result.append(reps[i, :residues].float().mean(0).cpu().numpy())
+                result.append(reps[i, :residues].float().cpu().numpy())
             return result
 
         return model, encode, {
@@ -235,11 +247,30 @@ def main():
     if not records:
         raise ValueError("Input FASTA contains no records")
     config = CONFIGS[args.model]
-    windows = make_windows(records, config["window"])
+    retain_residues = args.model == "prott5" and not args.skip_residue_embeddings
+    windows = make_windows(records, config["window"], config.get("overlap", 0) if retain_residues else 0)
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = args.output.parent / f".{args.output.name}.partial.{os.getpid()}"
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    temporary.mkdir()
     started = time.time()
     model, encode, backend = load_backend(args.model, torch, device)
     sums = np.zeros((len(records), config["dimension"]), dtype=np.float32)
     weights = np.zeros(len(records), dtype=np.int64)
+    offsets = np.concatenate(([0], np.cumsum([len(sequence) for _, sequence in records]))).astype(np.int64)
+    residue_sums = residue_counts = None
+    if retain_residues:
+        residue_sums = np.memmap(
+            temporary / "residue_sums.tmp", mode="w+", dtype=np.float32,
+            shape=(int(offsets[-1]), config["dimension"]),
+        )
+        residue_counts = np.memmap(
+            temporary / "residue_counts.tmp", mode="w+", dtype=np.uint16,
+            shape=(int(offsets[-1]),),
+        )
+        residue_sums[:] = 0
+        residue_counts[:] = 0
 
     batch_count = 0
     for batch_count, batch in enumerate(
@@ -247,33 +278,65 @@ def main():
     ):
         vectors = encode_with_oom_split(batch, encode, torch)
         for item, vector in zip(batch, vectors):
-            length, row, _, _ = item
-            if vector.shape != (config["dimension"],) or not np.isfinite(vector).all():
-                raise RuntimeError(f"Invalid embedding for {records[row][0]}: shape={vector.shape}")
-            sums[row] += vector * length
-            weights[row] += length
+            length, row, start, _ = item
+            if retain_residues:
+                if vector.shape != (length, config["dimension"]) or not np.isfinite(vector).all():
+                    raise RuntimeError(f"Invalid residue embedding for {records[row][0]}: shape={vector.shape}")
+                begin = int(offsets[row]) + start
+                end = begin + length
+                residue_sums[begin:end] += vector
+                residue_counts[begin:end] += 1
+            else:
+                if args.model == "prott5" and vector.shape == (length, config["dimension"]):
+                    vector = vector.mean(axis=0)
+                if vector.shape != (config["dimension"],) or not np.isfinite(vector).all():
+                    raise RuntimeError(f"Invalid embedding for {records[row][0]}: shape={vector.shape}")
+                sums[row] += vector * length
+                weights[row] += length
         if batch_count % 100 == 0:
-            print(f"Processed {sum(weights):,} residues", flush=True)
+            print(f"Processed {batch_count:,} embedding batches", flush=True)
 
     expected = np.array([len(sequence) for _, sequence in records])
-    if not np.array_equal(weights, expected):
-        raise RuntimeError("Not every residue contributed exactly once")
-    embeddings = sums / weights[:, None]
+    residue_path = offsets_path = None
+    if retain_residues:
+        if np.any(residue_counts == 0):
+            raise RuntimeError("At least one residue was not embedded")
+        residue_path = temporary / "residue_embeddings.npy"
+        offsets_path = temporary / "residue_offsets.npy"
+        residue_saved = np.lib.format.open_memmap(
+            residue_path, mode="w+", dtype=np.float16,
+            shape=(int(offsets[-1]), config["dimension"]),
+        )
+        embeddings = np.zeros((len(records), config["dimension"]), dtype=np.float32)
+        for row in range(len(records)):
+            begin, end = int(offsets[row]), int(offsets[row + 1])
+            values = np.asarray(residue_sums[begin:end]) / np.asarray(residue_counts[begin:end])[:, None]
+            if not np.isfinite(values).all():
+                raise RuntimeError(f"Non-finite residue embedding for {records[row][0]}")
+            residue_saved[begin:end] = values.astype(np.float16)
+            embeddings[row] = values.mean(axis=0)
+        residue_saved.flush()
+        np.save(offsets_path, offsets)
+        del residue_saved, residue_sums, residue_counts
+        (temporary / "residue_sums.tmp").unlink()
+        (temporary / "residue_counts.tmp").unlink()
+    else:
+        if not np.array_equal(weights, expected):
+            raise RuntimeError("Not every residue contributed exactly once")
+        embeddings = sums / weights[:, None]
     norms = np.linalg.norm(embeddings, axis=1)
     if not np.isfinite(embeddings).all() or np.any(norms == 0):
         raise RuntimeError("Final embeddings failed finite/nonzero validation")
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = args.output.parent / f".{args.output.name}.partial.{os.getpid()}"
-    if temporary.exists():
-        shutil.rmtree(temporary)
-    temporary.mkdir()
     embedding_path, ids_path = temporary / "embeddings.npy", temporary / "ids.tsv"
     np.save(embedding_path, embeddings.astype(np.float16))
     with ids_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(("row", "protein_id"))
         writer.writerows((row, identifier) for row, (identifier, _) in enumerate(records))
+    with (temporary / "sequences.faa").open("w", encoding="ascii") as handle:
+        for identifier, sequence in records:
+            handle.write(f">{identifier}\n{sequence}\n")
     saved = np.load(embedding_path, mmap_mode="r")
     if saved.shape != embeddings.shape or not np.isfinite(saved).all():
         raise RuntimeError("Saved embedding array failed validation")
@@ -287,17 +350,33 @@ def main():
         "record_count": len(records),
         "window_count": len(windows),
         "window_size": config["window"],
-        "long_sequence_policy": "non-overlapping windows; residue-count-weighted mean",
+        "long_sequence_policy": (
+            "1000-residue windows with 128-residue overlap and C-terminal anchoring; "
+            "overlapping residue representations averaged before mean pooling"
+            if retain_residues else "non-overlapping windows; residue-count-weighted mean"
+        ),
         "embedding_dimension": config["dimension"],
         "embedding_dtype": "float16",
         "embedding_shape": list(saved.shape),
         "embedding_file_sha256": sha256(embedding_path),
         "ids_file_sha256": sha256(ids_path),
+        "sequences_file_sha256": sha256(temporary / "sequences.faa"),
+        "residue_embeddings_retained": retain_residues,
         "device": str(device),
         "device_name": torch.cuda.get_device_name(0) if use_cuda else platform.processor(),
         "torch_version": torch.__version__,
         "elapsed_seconds": round(time.time() - started, 3),
     }
+    if retain_residues:
+        summary.update({
+            "residue_embedding_file": "residue_embeddings.npy",
+            "residue_embedding_shape": [int(offsets[-1]), config["dimension"]],
+            "residue_embedding_dtype": "float16",
+            "residue_embedding_file_sha256": sha256(residue_path),
+            "residue_offsets_file": "residue_offsets.npy",
+            "residue_offsets_file_sha256": sha256(offsets_path),
+            "residue_window_overlap": config["overlap"],
+        })
     (temporary / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     del saved, model
     if args.output.exists():

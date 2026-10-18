@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run binary ProtAudit scoring and conditional negative diagnostics."""
+"""Run ProtAudit binary scoring, conditional diagnostics, and error localization."""
 
 import argparse
 import csv
@@ -22,6 +22,11 @@ def parse_args():
     parser.add_argument("--plot", type=Path, help="Output plot (default: <output stem>_plot.png)")
     parser.add_argument("--model", help="Override model recorded in summary.json")
     parser.add_argument("--batch-size", type=int, default=4096)
+    parser.add_argument(
+        "--localization-output", type=Path,
+        help="Localization-only TSV (default: <output stem>_localization.tsv)",
+    )
+    parser.add_argument("--localization-device", choices=("auto", "cuda", "cpu"), default="auto")
     return parser.parse_args()
 
 
@@ -47,6 +52,15 @@ def read_ids(path, expected):
     if len(ids) != expected:
         raise ValueError(f"ID/embedding count mismatch: {len(ids)} != {expected}")
     return ids
+
+
+def read_sequences(path, expected_ids):
+    from embed import read_fasta
+
+    records = list(read_fasta(path))
+    if [identifier for identifier, _ in records] != list(expected_ids):
+        raise ValueError("Sequence identifiers do not match the embedding rows")
+    return [sequence for _, sequence in records]
 
 
 def mlp_class(torch, dimension):
@@ -205,6 +219,8 @@ def main():
     if not np.isfinite(embeddings).all():
         raise ValueError("Embeddings contain NaN or infinity")
     ids = read_ids(ids_path, len(embeddings))
+    sequences_path = args.embeddings / "sequences.faa"
+    sequences = read_sequences(sequences_path, ids) if sequences_path.is_file() else None
 
     import torch
 
@@ -230,6 +246,10 @@ def main():
     diagnostic_probabilities = None
     diagnostic_calls = None
     diagnostic_confidences = None
+    localization = {}
+    localization_output = args.localization_output or args.output.with_name(
+        f"{args.output.stem}_localization.tsv"
+    )
     negative = scores < threshold
     if model_name == "prott5":
         diagnostic_info = manifest["diagnostic_model"]
@@ -264,38 +284,109 @@ def main():
         diagnostic_confidences = (diagnostic_probabilities[np.arange(len(codes)), codes]
                                   if len(codes) else np.array([], dtype=np.float32))
 
+        residue_path = args.embeddings / summary.get("residue_embedding_file", "residue_embeddings.npy")
+        offsets_path = args.embeddings / summary.get("residue_offsets_file", "residue_offsets.npy")
+        if summary.get("residue_embeddings_retained"):
+            for path, key in (
+                (residue_path, "residue_embedding_file_sha256"),
+                (offsets_path, "residue_offsets_file_sha256"),
+            ):
+                if not path.is_file():
+                    raise FileNotFoundError(path)
+                if summary.get(key) and sha256(path) != summary[key]:
+                    raise ValueError(f"Residue-embedding checksum mismatch: {path}")
+            if sequences is None:
+                raise FileNotFoundError(
+                    "sequences.faa is required to report localized amino acids"
+                )
+            residue_embeddings = np.load(residue_path, mmap_mode="r")
+            residue_offsets = np.load(offsets_path)
+            if (residue_embeddings.ndim != 2 or residue_embeddings.shape[1] != 1024
+                    or residue_offsets.shape != (len(ids) + 1,)
+                    or int(residue_offsets[-1]) != len(residue_embeddings)):
+                raise ValueError("Invalid residue-embedding store")
+            expected_lengths = np.array([len(sequence) for sequence in sequences], dtype=np.int64)
+            if not np.array_equal(np.diff(residue_offsets), expected_lengths):
+                raise ValueError("Residue offsets do not match sequence lengths")
+            localizable_mask = np.isin(
+                diagnostic_calls, ["chimeric", "splice_artifact", "terminal_abnormal"]
+            )
+            localizable_negative_rows = negative_rows[localizable_mask]
+            localizable_classes = diagnostic_calls[localizable_mask]
+            if len(localizable_negative_rows):
+                from localizer import load_localizer, localize_rows
+
+                use_cuda = (torch.cuda.is_available() if args.localization_device == "auto"
+                            else args.localization_device == "cuda")
+                if args.localization_device == "cuda" and not torch.cuda.is_available():
+                    raise RuntimeError("--localization-device cuda requested, but CUDA is unavailable")
+                localization_device = torch.device("cuda:0" if use_cuda else "cpu")
+                localizer_info = manifest["localization_model"]
+                localizer_path = ROOT / localizer_info["checkpoint"]
+                localizer, _ = load_localizer(
+                    torch, localizer_path, localizer_info["sha256"], sha256,
+                    localization_device,
+                )
+                localization = localize_rows(
+                    torch, localizer, residue_embeddings, residue_offsets,
+                    localizable_negative_rows, localizable_classes, localization_device,
+                )
+
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         header = ["protein_id", "binary_call", "protein_likeness_score",
                   "passes_frozen_threshold", "score_band", "diagnostic_class",
-                  "diagnostic_class_probability"]
+                  "diagnostic_class_probability", "localization_status",
+                  "localized_residue_number", "localized_amino_acid",
+                  "localization_probability"]
         if diagnostic_classes:
             header.extend(f"probability_{name}" for name in diagnostic_classes)
         writer.writerow(header)
         negative_row = 0
-        for identifier, score in zip(ids, scores):
+        for row_index, (identifier, score) in enumerate(zip(ids, scores)):
             band = ">=0.9" if score >= 0.9 else "0.5-0.9" if score >= 0.5 else "<0.5"
             is_positive = bool(score >= threshold)
             row = [identifier, "positive" if is_positive else "negative", f"{score:.8f}",
-                   str(is_positive), band, "", ""]
+                   str(is_positive), band, "", "", "not_applicable_positive" if is_positive else "", "", "", ""]
             if diagnostic_classes:
                 row.extend([""] * len(diagnostic_classes))
                 if not is_positive:
                     row[5] = diagnostic_calls[negative_row]
                     row[6] = f"{diagnostic_confidences[negative_row]:.8f}"
-                    row[7:] = [f"{value:.8f}" for value in diagnostic_probabilities[negative_row]]
+                    if diagnostic_calls[negative_row] == "cryptic_orf":
+                        row[7] = "not_applicable_spurious_orf"
+                    elif not summary.get("residue_embeddings_retained"):
+                        row[7] = "unavailable_no_residue_embeddings"
+                    elif expected_row := localization.get(row_index):
+                        peak, probability = expected_row
+                        row[7:11] = ["localized", str(peak + 1), sequences[row_index][peak],
+                                     f"{probability:.8f}"]
+                    row[11:] = [f"{value:.8f}" for value in diagnostic_probabilities[negative_row]]
                     negative_row += 1
             writer.writerow(row)
+    localization_output.parent.mkdir(parents=True, exist_ok=True)
+    with localization_output.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
+        writer.writerow(("protein_id", "diagnostic_class", "protein_length",
+                         "localized_residue_number", "localized_amino_acid",
+                         "localization_probability"))
+        for row in sorted(localization):
+            peak, probability = localization[row]
+            writer.writerow((ids[row], diagnostic_calls[np.searchsorted(negative_rows, row)],
+                             len(sequences[row]), peak + 1, sequences[row][peak],
+                             f"{probability:.8f}"))
     plot_path = args.plot or args.output.with_name(f"{args.output.stem}_plot.png")
     make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, plot_path)
     print(f"Scored {len(scores):,} proteins with {model_name}")
     print(f"Binary calls: {int((~negative).sum()):,} positive; {int(negative.sum()):,} negative")
     if diagnostic_classes:
         print(f"Assigned conditional diagnostic probabilities to {int(negative.sum()):,} negatives")
+        print(f"Localized {len(localization):,} chimeric, splice-artifact, or terminal negatives")
     else:
         print("Conditional diagnostics are available only for ProtT5 embeddings")
     print(f"TSV:  {args.output}")
+    print(f"Localization TSV: {localization_output}")
     print(f"Plot: {plot_path}")
 
 

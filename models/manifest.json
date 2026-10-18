@@ -12,6 +12,21 @@
     ],
     "sha256": "fe37cba2469999c1c6171a78b5be7de08cb7969e2698ff3221b4f7938040c743"
   },
+  "localization_model": {
+    "checkpoint": "models/prott5_error_localizer.pt",
+    "embedding_model": "prott5",
+    "dimension": 1024,
+    "condition_classes": [
+      "chimeric",
+      "splice_artifact",
+      "terminal_abnormal"
+    ],
+    "excluded_diagnostic_classes": [
+      "cryptic_orf"
+    ],
+    "checkpoint_epoch": 4,
+    "sha256": "a965806c5393886f0f56d22e8caade5cb80ad68fc33a9eafadd378bb7803eb24"
+  },
   "models": {
     "prott5": {
       "checkpoint": "models/prott5.pt",
