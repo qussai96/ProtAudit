@@ -20,7 +20,6 @@ def parse_args():
     parser.add_argument("embeddings", type=Path, help="Directory created by embed.py")
     parser.add_argument("--output", "-o", type=Path, required=True, help="Output TSV")
     parser.add_argument("--plot", type=Path, help="Output plot (default: <output stem>_plot.png)")
-    parser.add_argument("--no-plot", action="store_true", help="Do not generate a summary plot")
     parser.add_argument("--model", help="Override model recorded in summary.json")
     parser.add_argument("--batch-size", type=int, default=4096)
     parser.add_argument(
@@ -377,11 +376,8 @@ def main():
             writer.writerow((ids[row], diagnostic_calls[np.searchsorted(negative_rows, row)],
                              len(sequences[row]), peak + 1, sequences[row][peak],
                              f"{probability:.8f}"))
-    plot_path = None if args.no_plot else (
-        args.plot or args.output.with_name(f"{args.output.stem}_plot.png")
-    )
-    if plot_path is not None:
-        make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, plot_path)
+    plot_path = args.plot or args.output.with_name(f"{args.output.stem}_plot.png")
+    make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, plot_path)
     print(f"Scored {len(scores):,} proteins with {model_name}")
     print(f"Binary calls: {int((~negative).sum()):,} positive; {int(negative.sum()):,} negative")
     if diagnostic_classes:
@@ -391,8 +387,7 @@ def main():
         print("Conditional diagnostics are available only for ProtT5 embeddings")
     print(f"TSV:  {args.output}")
     print(f"Localization TSV: {localization_output}")
-    if plot_path is not None:
-        print(f"Plot: {plot_path}")
+    print(f"Plot: {plot_path}")
 
 
 if __name__ == "__main__":
