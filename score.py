@@ -165,8 +165,10 @@ def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
                     "Composition of the negative group")
 
     histogram_axis = axes[-1]
-    bin_count = min(100, len(scores))
-    histogram_axis.hist(scores, bins=np.linspace(0, 1, bin_count + 1),
+    # Keep a fixed score resolution across runs. Choosing the number of bins
+    # from the sample count makes tiny inputs misleading: with two proteins,
+    # two adjacent half-axis bins can look like one solid rectangle.
+    histogram_axis.hist(scores, bins=np.linspace(0, 1, 51),
                         color="#5B84AD", edgecolor="white", linewidth=0.6)
     histogram_axis.axvline(threshold, color="#F23845", linestyle="--", linewidth=1.8,
                            label=f"Frozen threshold = {threshold:.3f}")
@@ -178,6 +180,8 @@ def make_plot(scores, threshold, diagnostic_calls, diagnostic_classes, output):
     histogram_axis.set_title("Distribution of ProtAudit protein-likeness scores",
                              fontsize=17, fontweight="bold", pad=20)
     histogram_axis.spines[["top", "right"]].set_visible(False)
+    from matplotlib.ticker import MaxNLocator
+    histogram_axis.yaxis.set_major_locator(MaxNLocator(integer=True, min_n_ticks=2))
     histogram_axis.legend(frameon=False, fontsize=10, loc="upper left")
     histogram_axis.tick_params(labelsize=10)
     fig.tight_layout(h_pad=2.4)
