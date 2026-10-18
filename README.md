@@ -1,7 +1,5 @@
 <div align="center">
-  <a href="https://colab.research.google.com/github/qussai96/ProtAudit/blob/main/ProtAudit_Colab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open in Colab" align="middle"></a>&nbsp;&nbsp;
-  <img src="assets/ProtAudit_logo.jpg" alt="ProtAudit logo" width="220" align="middle">&nbsp;&nbsp;
-  <img src="assets/chimeric-example.jpg" alt="ProtAudit localization of a literature-reported chimeric protein" width="520" align="middle">
+  <a href="https://colab.research.google.com/github/qussai96/ProtAudit/blob/main/ProtAudit_Colab.ipynb"><img src="assets/ProtAudit_header.png" alt="Open ProtAudit in Colab" width="100%"></a>
 </div>
 
 # ProtAudit
