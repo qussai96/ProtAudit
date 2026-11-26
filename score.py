@@ -320,17 +320,27 @@ def main():
             if len(localizable_negative_rows):
                 from localizer import load_localizer, localize_rows
 
-                use_cuda = (torch.cuda.is_available() if args.localization_device == "auto"
-                            else args.localization_device == "cuda")
-                if args.localization_device == "cuda" and not torch.cuda.is_available():
-                    raise RuntimeError("--localization-device cuda requested, but CUDA is unavailable")
-                localization_device = torch.device("cuda:0" if use_cuda else "cpu")
+                from embed import choose_device
+                localization_device = choose_device(
+                    torch, args.localization_device, purpose="error localization"
+                )
                 localizer_info = manifest["localization_model"]
                 localizer_path = ROOT / localizer_info["checkpoint"]
                 localizer, _ = load_localizer(
                     torch, localizer_path, localizer_info["sha256"], sha256,
                     localization_device,
                 )
+                validated_range = localizer_info.get("validated_length_range", [20, 2000])
+                outside = [
+                    row for row in localizable_negative_rows
+                    if not validated_range[0] <= len(sequences[row]) <= validated_range[1]
+                ]
+                if outside:
+                    print(
+                        f"WARNING: localizing {len(outside):,} proteins outside the validated "
+                        f"length range {validated_range[0]}-{validated_range[1]} aa.",
+                        file=sys.stderr,
+                    )
                 localization = localize_rows(
                     torch, localizer, residue_embeddings, residue_offsets,
                     localizable_negative_rows, localizable_classes, localization_device,
@@ -349,8 +359,9 @@ def main():
         writer.writerow(header)
         negative_row = 0
         for row_index, (identifier, score) in enumerate(zip(ids, scores)):
-            band = ">=0.9" if score >= 0.9 else "0.5-0.9" if score >= 0.5 else "<0.5"
             is_positive = bool(score >= threshold)
+            band = ("negative_below_threshold" if not is_positive else
+                    "positive_>=0.9" if score >= 0.9 else "positive_below_0.9")
             row = [identifier, "positive" if is_positive else "negative", f"{score:.8f}",
                    str(is_positive), band, "", "", "not_applicable_positive" if is_positive else "", "", "", ""]
             if diagnostic_classes:

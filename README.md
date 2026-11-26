@@ -64,22 +64,29 @@ To use another frozen model, add one of `--model esm2_320`,
 `--model esm2_1280`, or `--model carp` to the embedding command. The scoring
 command reads the selected model from `embeddings/summary.json` automatically.
 Long proteins are embedded without truncation using model-safe windows and a
-residue-weighted mean. ProtT5 additionally retains one 1,024-dimensional
-float16 vector per residue. Long ProtT5 sequences use 1,000-residue windows
-with 128-residue overlap; representations for overlapping residues are
-averaged before whole-protein mean pooling and localization.
+residue-weighted mean matching binary-model training: non-overlapping windows
+of 1,000 residues for ProtT5, 1,022 for ESM-2, and 1,024 for CARP. This rule is
+unchanged by `--skip-residue-embeddings`. ProtT5 additionally retains one
+1,024-dimensional float16 vector per residue for localization. For that
+residue store only, long sequences use 1,000-residue windows with 128-residue
+overlap, and representations for overlapping residues are averaged.
 
 ## Output
 
 `embed.py` writes `embeddings.npy`, `ids.tsv`, `sequences.faa`, and
 provenance/checksums in `summary.json`. For ProtT5 it also writes
 `residue_embeddings.npy` and `residue_offsets.npy`. The residue store requires
-approximately 2 KiB per amino acid because it is saved as float16.
+approximately 2 KiB per amino acid because it is saved as float16. During
+embedding, an additional approximately 4 KiB per amino acid is needed only for
+proteins longer than 1,000 residues while their overlapping representations
+are accumulated; it is removed after successful completion. Invalid records
+and repeated identifiers are skipped and listed with their reasons in
+`rejected_records.tsv`.
 
 `score.py` writes:
 
 - `protaudit_scores.tsv`: protein ID, binary call, protein-likeness score,
-  frozen-threshold call, score band, and (for ProtT5 negatives) the predicted
+  frozen-threshold call, threshold-relative score band, and (for ProtT5 negatives) the predicted
   diagnostic class, its top probability, and all four class probabilities.
 - `protaudit_scores_localization.tsv`: one row per localizable negative with
   the predicted broad class, protein length, one-based peak residue number,
@@ -98,6 +105,10 @@ receiving a binary-negative call; they should not be interpreted as biological
 proof of a particular annotation error. Likewise, a localization peak is a
 candidate site for inspection, not proof of causality or a proposed annotation
 repair.
+
+The localizer was validated on proteins 20–2,000 amino acids long. Longer or
+shorter sequences are still processed, but `score.py` emits a warning because
+their localization output is outside the validated length range.
 
 ## Citation
 

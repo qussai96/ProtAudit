@@ -25,6 +25,10 @@
       "cryptic_orf"
     ],
     "checkpoint_epoch": 4,
+    "validated_length_range": [
+      20,
+      2000
+    ],
     "sha256": "a965806c5393886f0f56d22e8caade5cb80ad68fc33a9eafadd378bb7803eb24"
   },
   "models": {

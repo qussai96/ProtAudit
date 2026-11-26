@@ -18,7 +18,9 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 CONFIGS = {
-    "prott5": {"dimension": 1024, "window": 1000, "overlap": 128},
+    # Protein-level classifiers were trained with non-overlapping windows.
+    # Only the ProtT5 residue localizer uses overlapping contextual windows.
+    "prott5": {"dimension": 1024, "window": 1000, "residue_overlap": 128},
     "esm2_1280": {"dimension": 1280, "window": 1022, "layer": 33},
     "esm2_320": {"dimension": 320, "window": 1022, "layer": 6},
     "carp": {"dimension": 1280, "window": 1024, "layer": 56},
@@ -52,8 +54,42 @@ def sha256(path, chunk_size=8 * 1024 * 1024):
     return digest.hexdigest()
 
 
-def read_fasta(path):
-    header, pieces, seen = None, [], set()
+def read_fasta(path, rejected=None):
+    """Yield usable records and optionally collect rejected-record diagnostics.
+
+    A malformed biological record must not terminate an audit of every other
+    protein. Structural FASTA errors (for example sequence before any header)
+    remain fatal because record boundaries cannot be recovered safely.
+    """
+    header, pieces, seen, header_line = None, [], set(), None
+
+    def finish(identifier, sequence, line_number):
+        sequence = sequence.upper()
+        if sequence.endswith((".", "*")):
+            sequence = sequence[:-1]
+        reason = None
+        if identifier in seen:
+            reason = "duplicate_id"
+        elif not sequence:
+            reason = "empty_sequence"
+        else:
+            invalid = sorted(set(sequence) - ALLOWED_AA)
+            if invalid:
+                reason = ("internal_stop" if set(invalid).issubset({".", "*"})
+                          else "invalid_residues:" + "".join(invalid))
+        if reason:
+            if rejected is None:
+                raise ValueError(f"Rejected FASTA record {identifier}: {reason}")
+            rejected.append({
+                "protein_id": identifier,
+                "header_line": line_number,
+                "reason": reason,
+                "sequence_length": len(sequence),
+            })
+            return None
+        seen.add(identifier)
+        return identifier, sequence
+
     with path.open("r", encoding="ascii", errors="strict") as handle:
         for line_number, raw in enumerate(handle, 1):
             line = raw.strip()
@@ -61,34 +97,21 @@ def read_fasta(path):
                 continue
             if line.startswith(">"):
                 if header is not None:
-                    yield validate_record(header, "".join(pieces), seen)
+                    record = finish(header, "".join(pieces), header_line)
+                    if record is not None:
+                        yield record
                 fields = line[1:].split()
                 if not fields:
                     raise ValueError(f"Empty FASTA ID at line {line_number}")
-                header, pieces = fields[0], []
+                header, pieces, header_line = fields[0], [], line_number
             elif header is None:
                 raise ValueError(f"Sequence before first header at line {line_number}")
             else:
                 pieces.append(line)
     if header is not None:
-        yield validate_record(header, "".join(pieces), seen)
-
-
-def validate_record(identifier, sequence, seen):
-    sequence = sequence.upper()
-    # Many protein FASTA exporters append one stop symbol. Treat it as
-    # formatting only when terminal; internal dots/asterisks remain invalid.
-    if sequence.endswith((".", "*")):
-        sequence = sequence[:-1]
-    if identifier in seen:
-        raise ValueError(f"Duplicate FASTA ID: {identifier}")
-    seen.add(identifier)
-    if not sequence:
-        raise ValueError(f"Empty sequence: {identifier}")
-    invalid = sorted(set(sequence) - ALLOWED_AA)
-    if invalid:
-        raise ValueError(f"Invalid residues for {identifier}: {''.join(invalid)}")
-    return identifier, sequence
+        record = finish(header, "".join(pieces), header_line)
+        if record is not None:
+            yield record
 
 
 def make_windows(records, size, overlap=0):
@@ -160,11 +183,14 @@ def load_backend(name, torch, device):
         try:
             import transformers
             from transformers import T5EncoderModel, T5Tokenizer
+            checkpoint = "Rostlab/prot_t5_xl_half_uniref50-enc"
+            tokenizer = T5Tokenizer.from_pretrained(checkpoint, do_lower_case=False)
+            model = T5EncoderModel.from_pretrained(checkpoint).eval()
         except ImportError as exc:
-            raise RuntimeError("ProtT5 requires: pip install transformers sentencepiece") from exc
-        checkpoint = "Rostlab/prot_t5_xl_half_uniref50-enc"
-        tokenizer = T5Tokenizer.from_pretrained(checkpoint, do_lower_case=False)
-        model = T5EncoderModel.from_pretrained(checkpoint).eval()
+            raise RuntimeError(
+                "ProtT5 dependencies could not be imported. Install requirements.txt. "
+                f"Original error: {exc!r}"
+            ) from exc
         if device.type == "cpu":
             model = model.float()
         model = model.to(device)
@@ -197,11 +223,12 @@ def load_backend(name, torch, device):
 
     try:
         from sequence_models.pretrained import load_model_and_alphabet
+        model, collater = load_model_and_alphabet("carp_640M")
     except ImportError as exc:
         raise RuntimeError(
-            "CARP requires: pip install git+https://github.com/microsoft/protein-sequence-models.git"
+            "CARP dependencies could not be imported. Install requirements.txt. "
+            f"Original error: {exc!r}"
         ) from exc
-    model, collater = load_model_and_alphabet("carp_640M")
     model = model.eval().to(device)
 
     def encode(items):
@@ -226,6 +253,39 @@ def encode_with_oom_split(items, encode, torch):
         )
 
 
+def cuda_compatibility(torch, device_index=0):
+    """Return (usable, reason) for the installed PyTorch binary and GPU."""
+    if not torch.cuda.is_available():
+        return False, "CUDA is unavailable"
+    try:
+        major, minor = torch.cuda.get_device_capability(device_index)
+        architecture = major * 10 + minor
+        compiled = set(torch.cuda.get_arch_list())
+    except Exception as exc:
+        return False, f"CUDA compatibility check failed: {exc}"
+    exact = f"sm_{architecture}"
+    ptx = [int(item.split("_")[1]) for item in compiled if item.startswith("compute_")]
+    if exact in compiled or any(item <= architecture for item in ptx):
+        return True, f"compute capability {major}.{minor} is supported"
+    return False, (
+        f"GPU compute capability {major}.{minor} is not supported by this PyTorch build "
+        f"({', '.join(sorted(compiled)) or 'no CUDA architectures reported'})"
+    )
+
+
+def choose_device(torch, requested, purpose="embedding"):
+    usable, reason = cuda_compatibility(torch)
+    if requested == "cuda":
+        if not usable:
+            raise RuntimeError(f"--device cuda requested for {purpose}, but {reason}")
+        return torch.device("cuda:0")
+    if requested == "auto" and usable:
+        return torch.device("cuda:0")
+    if requested == "auto" and torch.cuda.is_available():
+        print(f"WARNING: {reason}; falling back to CPU for {purpose}.", file=sys.stderr)
+    return torch.device("cpu")
+
+
 def main():
     args = parse_args()
     if args.max_batch_tokens < 1 or args.max_batch_size < 1:
@@ -239,16 +299,17 @@ def main():
 
     import torch
 
-    use_cuda = torch.cuda.is_available() if args.device == "auto" else args.device == "cuda"
-    if args.device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("--device cuda requested, but CUDA is unavailable")
-    device = torch.device("cuda:0" if use_cuda else "cpu")
-    records = list(read_fasta(args.fasta))
+    device = choose_device(torch, args.device)
+    use_cuda = device.type == "cuda"
+    rejected = []
+    records = list(read_fasta(args.fasta, rejected=rejected))
     if not records:
         raise ValueError("Input FASTA contains no records")
     config = CONFIGS[args.model]
     retain_residues = args.model == "prott5" and not args.skip_residue_embeddings
-    windows = make_windows(records, config["window"], config.get("overlap", 0) if retain_residues else 0)
+    # This is the frozen protein-classifier preprocessing for every model and
+    # must never depend on whether residue embeddings are retained.
+    windows = make_windows(records, config["window"], overlap=0)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.parent / f".{args.output.name}.partial.{os.getpid()}"
     if temporary.exists():
@@ -259,18 +320,33 @@ def main():
     sums = np.zeros((len(records), config["dimension"]), dtype=np.float32)
     weights = np.zeros(len(records), dtype=np.int64)
     offsets = np.concatenate(([0], np.cumsum([len(sequence) for _, sequence in records]))).astype(np.int64)
-    residue_sums = residue_counts = None
+    residue_sums = residue_counts = residue_saved = None
+    residue_path = offsets_path = None
+    long_rows, long_offsets = [], {}
     if retain_residues:
-        residue_sums = np.memmap(
-            temporary / "residue_sums.tmp", mode="w+", dtype=np.float32,
+        residue_path = temporary / "residue_embeddings.npy"
+        offsets_path = temporary / "residue_offsets.npy"
+        residue_saved = np.lib.format.open_memmap(
+            residue_path, mode="w+", dtype=np.float16,
             shape=(int(offsets[-1]), config["dimension"]),
         )
-        residue_counts = np.memmap(
-            temporary / "residue_counts.tmp", mode="w+", dtype=np.uint16,
-            shape=(int(offsets[-1]),),
-        )
-        residue_sums[:] = 0
-        residue_counts[:] = 0
+        # Float32 accumulation is required only for long proteins whose
+        # overlapping localizer windows need averaging—not for the proteome.
+        long_rows = [row for row, (_, seq) in enumerate(records) if len(seq) > config["window"]]
+        long_offsets = {row: start for row, start in zip(
+            long_rows,
+            np.cumsum([0] + [len(records[row][1]) for row in long_rows[:-1]]),
+        )}
+        long_residue_count = sum(len(records[row][1]) for row in long_rows)
+        if long_residue_count:
+            residue_sums = np.memmap(
+                temporary / "residue_sums.tmp", mode="w+", dtype=np.float32,
+                shape=(long_residue_count, config["dimension"]),
+            )
+            residue_counts = np.memmap(
+                temporary / "residue_counts.tmp", mode="w+", dtype=np.uint16,
+                shape=(long_residue_count,),
+            )
 
     batch_count = 0
     for batch_count, batch in enumerate(
@@ -279,51 +355,62 @@ def main():
         vectors = encode_with_oom_split(batch, encode, torch)
         for item, vector in zip(batch, vectors):
             length, row, start, _ = item
-            if retain_residues:
-                if vector.shape != (length, config["dimension"]) or not np.isfinite(vector).all():
-                    raise RuntimeError(f"Invalid residue embedding for {records[row][0]}: shape={vector.shape}")
-                begin = int(offsets[row]) + start
-                end = begin + length
-                residue_sums[begin:end] += vector
-                residue_counts[begin:end] += 1
-            else:
-                if args.model == "prott5" and vector.shape == (length, config["dimension"]):
-                    vector = vector.mean(axis=0)
-                if vector.shape != (config["dimension"],) or not np.isfinite(vector).all():
-                    raise RuntimeError(f"Invalid embedding for {records[row][0]}: shape={vector.shape}")
-                sums[row] += vector * length
-                weights[row] += length
+            if args.model == "prott5" and vector.shape == (length, config["dimension"]):
+                if retain_residues and len(records[row][1]) <= config["window"]:
+                    begin = int(offsets[row])
+                    residue_saved[begin:begin + length] = vector.astype(np.float16)
+                vector = vector.mean(axis=0)
+            if vector.shape != (config["dimension"],) or not np.isfinite(vector).all():
+                raise RuntimeError(f"Invalid embedding for {records[row][0]}: shape={vector.shape}")
+            sums[row] += vector * length
+            weights[row] += length
         if batch_count % 100 == 0:
             print(f"Processed {batch_count:,} embedding batches", flush=True)
 
     expected = np.array([len(sequence) for _, sequence in records])
-    residue_path = offsets_path = None
     if retain_residues:
-        if np.any(residue_counts == 0):
-            raise RuntimeError("At least one residue was not embedded")
-        residue_path = temporary / "residue_embeddings.npy"
-        offsets_path = temporary / "residue_offsets.npy"
-        residue_saved = np.lib.format.open_memmap(
-            residue_path, mode="w+", dtype=np.float16,
-            shape=(int(offsets[-1]), config["dimension"]),
+        residue_windows = make_windows(
+            [records[row] for row in long_rows], config["window"], config["residue_overlap"]
         )
-        embeddings = np.zeros((len(records), config["dimension"]), dtype=np.float32)
-        for row in range(len(records)):
+        # make_windows indexes its subset; restore original protein rows.
+        restored_windows = [
+            (length, long_rows[subset_row], start, piece)
+            for length, subset_row, start, piece in residue_windows
+        ]
+        for batch_count, batch in enumerate(
+            batches(restored_windows, args.max_batch_tokens, args.max_batch_size), 1
+        ):
+            vectors = encode_with_oom_split(batch, encode, torch)
+            for item, vector in zip(batch, vectors):
+                length, row, start, _ = item
+                if vector.shape != (length, config["dimension"]) or not np.isfinite(vector).all():
+                    raise RuntimeError(
+                        f"Invalid residue embedding for {records[row][0]}: shape={vector.shape}"
+                    )
+                begin = int(long_offsets[row]) + start
+                end = begin + length
+                residue_sums[begin:end] += vector
+                residue_counts[begin:end] += 1
+        if long_rows and np.any(residue_counts == 0):
+            raise RuntimeError("At least one residue was not embedded")
+        for row in long_rows:
             begin, end = int(offsets[row]), int(offsets[row + 1])
-            values = np.asarray(residue_sums[begin:end]) / np.asarray(residue_counts[begin:end])[:, None]
+            compact_begin = int(long_offsets[row])
+            compact_end = compact_begin + (end - begin)
+            values = (np.asarray(residue_sums[compact_begin:compact_end]) /
+                      np.asarray(residue_counts[compact_begin:compact_end])[:, None])
             if not np.isfinite(values).all():
                 raise RuntimeError(f"Non-finite residue embedding for {records[row][0]}")
             residue_saved[begin:end] = values.astype(np.float16)
-            embeddings[row] = values.mean(axis=0)
         residue_saved.flush()
         np.save(offsets_path, offsets)
         del residue_saved, residue_sums, residue_counts
-        (temporary / "residue_sums.tmp").unlink()
-        (temporary / "residue_counts.tmp").unlink()
-    else:
-        if not np.array_equal(weights, expected):
-            raise RuntimeError("Not every residue contributed exactly once")
-        embeddings = sums / weights[:, None]
+        for scratch in (temporary / "residue_sums.tmp", temporary / "residue_counts.tmp"):
+            if scratch.exists():
+                scratch.unlink()
+    if not np.array_equal(weights, expected):
+        raise RuntimeError("Not every residue contributed exactly once")
+    embeddings = sums / weights[:, None]
     norms = np.linalg.norm(embeddings, axis=1)
     if not np.isfinite(embeddings).all() or np.any(norms == 0):
         raise RuntimeError("Final embeddings failed finite/nonzero validation")
@@ -334,6 +421,14 @@ def main():
         writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
         writer.writerow(("row", "protein_id"))
         writer.writerows((row, identifier) for row, (identifier, _) in enumerate(records))
+    rejected_path = temporary / "rejected_records.tsv"
+    with rejected_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=("protein_id", "header_line", "reason", "sequence_length"),
+            delimiter="\t", lineterminator="\n",
+        )
+        writer.writeheader()
+        writer.writerows(rejected)
     with (temporary / "sequences.faa").open("w", encoding="ascii") as handle:
         for identifier, sequence in records:
             handle.write(f">{identifier}\n{sequence}\n")
@@ -348,12 +443,13 @@ def main():
         "input_fasta": str(args.fasta.resolve()),
         "input_fasta_sha256": sha256(args.fasta),
         "record_count": len(records),
+        "rejected_record_count": len(rejected),
+        "rejected_records_file": "rejected_records.tsv",
+        "rejected_records_file_sha256": sha256(rejected_path),
         "window_count": len(windows),
         "window_size": config["window"],
         "long_sequence_policy": (
-            "1000-residue windows with 128-residue overlap and C-terminal anchoring; "
-            "overlapping residue representations averaged before mean pooling"
-            if retain_residues else "non-overlapping windows; residue-count-weighted mean"
+            f"non-overlapping {config['window']}-residue windows; residue-count-weighted mean"
         ),
         "embedding_dimension": config["dimension"],
         "embedding_dtype": "float16",
@@ -375,7 +471,12 @@ def main():
             "residue_embedding_file_sha256": sha256(residue_path),
             "residue_offsets_file": "residue_offsets.npy",
             "residue_offsets_file_sha256": sha256(offsets_path),
-            "residue_window_overlap": config["overlap"],
+            "residue_window_overlap": config["residue_overlap"],
+            "residue_window_count": len(restored_windows),
+            "residue_long_sequence_policy": (
+                f"{config['window']}-residue windows with {config['residue_overlap']}-residue "
+                "overlap and C-terminal anchoring; overlapping representations averaged"
+            ),
         })
     (temporary / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n")
     del saved, model
@@ -383,6 +484,8 @@ def main():
         shutil.rmtree(args.output)
     os.replace(temporary, args.output)
     print(f"Saved {len(records):,} {args.model} embeddings to {args.output}")
+    if rejected:
+        print(f"Skipped {len(rejected):,} rejected FASTA records; see {args.output / 'rejected_records.tsv'}")
 
 
 if __name__ == "__main__":
